@@ -77,10 +77,10 @@ resources:
 # named exactly that, unlike ThunderID's own built-in "Administrator" role
 # (a different name, for a different authorization domain — see users.yaml).
 #
-# UNVERIFIED: we have not confirmed against a running instance that the
-# `roles` claim actually carries role NAMES like this one, rather than
-# resourceServer:permission strings the way the `permissions` block below is
-# scoped. Decode a real token after login before relying on this.
+# VERIFIED: confirmed against a running instance by logging in as ndx-admin
+# via `ondx login` and decoding the access token — the `roles` claim carries
+# role NAMES like this one (not resourceServer:permission strings the way the
+# `permissions` block below is scoped).
 resource_type: role
 id: 01900000-0000-7000-8000-0000000000b4
 name: OpenNDX_Admin
