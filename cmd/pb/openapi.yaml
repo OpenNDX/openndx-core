@@ -5,8 +5,15 @@ info:
     A secure, scalable Go-based REST Portal Backend for managing government data exchange workflows.
     
     ## Authentication
-    All API endpoints (except /health, /debug, and /debug/db) require JWT authentication using Bearer tokens 
-    from Asgardeo identity provider.
+    All /api/v1/ endpoints require JWT authentication using Bearer tokens from the configured OIDC-compliant
+    identity provider (ThunderID is the primary supported provider; other OIDC-compliant IdPs may also be
+    configured), enforced by a CORS -> JWT authentication -> RBAC authorization middleware chain.
+
+    /health, /debug, and /debug/db are exempt from authentication.
+
+    The /internal/api/v1/ endpoints (for service-to-service communication) bypass this entire middleware
+    chain - no CORS, no JWT authentication, and no RBAC authorization is applied. They are intended to be
+    reachable only from within the internal network and must never be exposed publicly.
     
     ## Authorization  
     The API implements role-based access control (RBAC) with the following roles:
@@ -15,7 +22,7 @@ info:
     - **OpenNDX_System**: System-level operations with read access
     
     ## Features
-    - JWT authentication with Asgardeo integration
+    - JWT authentication with pluggable OIDC identity provider integration
     - Role-based access control with granular permissions
     - Thread-safe caching for optimal performance
     - Ownership-based resource access validation
@@ -27,14 +34,10 @@ info:
   contact:
     name: OpenNDX Team
   license:
-    name: MIT
-    url: https://opensource.org/licenses/MIT
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
 
 servers:
-  - url: https://portal-backend.choreo.dev
-    description: Choreo Production Environment
-  - url: https://portal-backend-dev.choreo.dev
-    description: Choreo Development Environment
   - url: http://localhost:8083
     description: Local Development Environment
 
@@ -604,6 +607,56 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /api/v1/applications/{applicationId}/policy:
+    put:
+      summary: Update application policy
+      description: |
+        Replaces an existing application's allow-list: the schema fields it is
+        granted access to and, optionally, the PDP grant duration. Field/policy
+        updates go through this endpoint rather than the general application
+        update endpoint.
+      operationId: updateApplicationPolicy
+      tags:
+        - Applications
+      parameters:
+        - name: applicationId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The application ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateApplicationPolicyRequest'
+      responses:
+        '200':
+          description: Application policy updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Insufficient permissions or access denied to this resource
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /internal/api/v1/applications:
     get:
       summary: Get application ID by IDP Client ID (Internal)
@@ -624,6 +677,7 @@ paths:
       operationId: getApplicationIdByIdpClientId
       tags:
         - Internal - Applications
+      security: []
       parameters:
         - name: idpClientId
           in: query
@@ -823,6 +877,16 @@ components:
           format: email
         phoneNumber:
           type: string
+        idpUserId:
+          type: string
+          description: |
+            Registers a member whose IDP account was already provisioned
+            directly (e.g. manually via the identity provider's own console,
+            for providers idpfactory doesn't yet support automatic account
+            creation for). When set, creation skips creating the user and
+            assigning them to the member group in the IDP, using this value
+            as-is - the caller is responsible for that group/role assignment
+            having already happened.
 
     UpdateMemberRequest:
       type: object
@@ -844,30 +908,6 @@ components:
           type: string
           format: date-time
           nullable: true
-
-    Entity:
-      allOf:
-        - $ref: '#/components/schemas/BaseModel'
-        - type: object
-          properties:
-            entityId:
-              type: string
-              description: Unique identifier for the entity
-            name:
-              type: string
-              description: Entity name
-            email:
-              type: string
-              format: email
-              description: Entity email address
-            phoneNumber:
-              type: string
-              description: Entity phone number
-            idpUserId:
-              type: string
-              description: Identity provider user ID
-
-    
 
     Schema:
       allOf:
@@ -954,10 +994,6 @@ components:
               items:
                 $ref: '#/components/schemas/SelectedFieldRecord'
               description: Selected fields for data access
-            status:
-              type: string
-              enum: [pending, approved, rejected]
-              description: Application status
             version:
               type: string
               enum: [active, deprecated]
@@ -1014,97 +1050,58 @@ components:
 
     SelectedFieldRecord:
       type: object
+      required:
+        - fieldName
+        - schemaId
       properties:
         fieldName:
           type: string
           description: Name of the selected field
-        fieldType:
+        schemaId:
           type: string
-          description: Type of the field
+          description: Reference to the schema the field belongs to
+
+    GrantDurationType:
+      type: string
+      enum: ["30d", "365d"]
+      description: PDP grant duration for an application's field access policy
+
+    PolicyMetadataCreateRequestRecord:
+      type: object
+      required:
+        - fieldName
+        - source
+        - isOwner
+        - accessControlType
+      properties:
+        fieldName:
+          type: string
+          description: |
+            Field path. Used as-is (no forced typename.fieldName prefix the
+            way SDL-derived field paths get).
+        displayName:
+          type: string
+          nullable: true
         description:
           type: string
           nullable: true
-          description: Field description
-        required:
+        source:
+          type: string
+          enum: [primary, fallback]
+        isOwner:
           type: boolean
-          description: Whether the field is required
-
-    CreateEntityRequest:
-      type: object
-      required:
-        - name
-        - email
-        - phoneNumber
-        - idpUserId
-      properties:
-        name:
+        accessControlType:
           type: string
-          description: Entity name
-        email:
+          enum: [public, restricted]
+        owner:
           type: string
-          format: email
-          description: Entity email address
-        phoneNumber:
-          type: string
-          description: Entity phone number
-        idpUserId:
-          type: string
-          description: Identity provider user ID
-
-    UpdateEntityRequest:
-      type: object
-      properties:
-        name:
-          type: string
-          description: Entity name
-        email:
-          type: string
-          format: email
-          description: Entity email address
-        phoneNumber:
-          type: string
-          description: Entity phone number
-        idpUserId:
-          type: string
-          description: Identity provider user ID
-
-    CreateProviderRequest:
-      type: object
-      required:
-        - entityId
-      properties:
-        entityId:
-          type: string
-          description: Reference to the associated entity
-
-    UpdateProviderRequest:
-      type: object
-      properties:
-        entityId:
-          type: string
-          description: Reference to the associated entity
-
-    CreateConsumerRequest:
-      type: object
-      required:
-        - entityId
-      properties:
-        entityId:
-          type: string
-          description: Reference to the associated entity
-
-    UpdateConsumerRequest:
-      type: object
-      properties:
-        entityId:
-          type: string
-          description: Reference to the associated entity
+          enum: [citizen]
+          nullable: true
 
     CreateSchemaRequest:
       type: object
       required:
         - schemaName
-        - sdl
         - endpoint
         - memberId
       properties:
@@ -1117,13 +1114,34 @@ components:
           description: Description of the schema
         sdl:
           type: string
-          description: Schema Definition Language content
+          description: |
+            A GraphQL SDL string annotated with @accessControl/@source (and
+            optionally @displayName/@description/@isOwner/@owner) directives,
+            parsed into policy metadata records. Mutually exclusive with
+            fields - exactly one of sdl or fields must be provided.
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyMetadataCreateRequestRecord'
+          description: |
+            Declares policy metadata records directly, skipping SDL/GraphQL
+            parsing entirely - each fieldName is used as-is (no forced
+            typename.fieldName prefix the way SDL-derived field paths get).
+            Mutually exclusive with sdl - exactly one of sdl or fields must
+            be provided.
         endpoint:
           type: string
           description: GraphQL endpoint URL
         memberId:
           type: string
           description: Reference to the owning member
+      oneOf:
+        - required: [sdl]
+          not:
+            required: [fields]
+        - required: [fields]
+          not:
+            required: [sdl]
 
     UpdateSchemaRequest:
       type: object
@@ -1207,6 +1225,7 @@ components:
       type: object
       required:
         - applicationName
+        - selectedFields
         - memberId
       properties:
         applicationName:
@@ -1216,9 +1235,41 @@ components:
           type: string
           nullable: true
           description: Description of the application
+        selectedFields:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelectedFieldRecord'
+          minItems: 1
+          description: Selected fields for data access
         memberId:
           type: string
           description: Reference to the owning member
+        idpApplicationId:
+          type: string
+          nullable: true
+          description: |
+            Registers an application whose OAuth2 client was already
+            provisioned directly in the IDP (e.g. manually via the identity
+            provider's own console, for providers idpfactory doesn't yet
+            support automatic application creation for). When set together
+            with idpClientId, creation skips calling the IDP entirely and
+            uses these values as-is. Must be provided together with
+            idpClientId (both or neither).
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        idpClientId:
+          type: string
+          nullable: true
+          description: |
+            Identity Provider Client ID used for M2M token authentication.
+            Must be provided together with idpApplicationId (both or
+            neither).
+          example: "a1b2c3d4e5f6g7h8i9j0"
+      oneOf:
+        - required: [idpApplicationId, idpClientId]
+        - not:
+            anyOf:
+              - required: [idpApplicationId]
+              - required: [idpClientId]
 
     UpdateApplicationRequest:
       type: object
@@ -1230,10 +1281,27 @@ components:
           type: string
           nullable: true
           description: Description of the application
-        status:
+        version:
           type: string
-          enum: [pending, approved, rejected]
-          description: Application status
+          enum: [active, deprecated]
+          description: |
+            Version status of the application. Note: selected fields/policy
+            updates go through PUT /api/v1/applications/{applicationId}/policy
+            instead of this endpoint.
+
+    UpdateApplicationPolicyRequest:
+      type: object
+      required:
+        - selectedFields
+      properties:
+        selectedFields:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelectedFieldRecord'
+          minItems: 1
+          description: Replaces the application's allow-list of schema fields
+        grantDuration:
+          $ref: '#/components/schemas/GrantDurationType'
 
     CreateApplicationSubmissionRequest:
       type: object
@@ -1349,12 +1417,8 @@ tags:
     description: Health check endpoints
   - name: Debug
     description: Debug information endpoints
-  - name: Entities
-    description: Entity management endpoints
-  - name: Providers
-    description: Provider management endpoints
-  - name: Consumers
-    description: Consumer management endpoints
+  - name: Members
+    description: Member management endpoints
   - name: Schemas
     description: Schema management endpoints
   - name: Schema Submissions
@@ -1363,3 +1427,8 @@ tags:
     description: Application management endpoints
   - name: Application Submissions
     description: Application submission management endpoints
+  - name: Internal - Applications
+    description: |
+      Internal service-to-service endpoints. These are not exposed through
+      the same CORS/JWT/RBAC middleware chain as the /api/v1/ endpoints -
+      see the Authentication section above.
