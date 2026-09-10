@@ -10,8 +10,8 @@ start-to-finish version.
 
 - Go 1.26+ (only needed for the `go install`/`go build` methods below — not to run the binary
   once built)
-- Network access to an OpenNDX Portal Backend instance and the identity provider it trusts
-  (ThunderID for this repo's local-dev stack, or Asgardeo/WSO2 for most other environments)
+- Network access to an OpenNDX Portal Backend instance and ThunderID, the identity provider it
+  trusts
 
 ## 1. Install
 
@@ -30,14 +30,17 @@ go install github.com/openndx/openndx-core/cmd/cli@main
 > `@v0.3.0` etc.) will work too.
 
 `go install` names the resulting binary after the package **directory**, not the module doc
-comment — so this produces a binary literally named `cli`, not `ondx`. Rename it after install:
+comment — so this produces a binary literally named `cli`, not `ondx`. It's installed to `GOBIN`
+if you've set that, otherwise `$(go env GOPATH)/bin`. Resolve whichever applies and rename the
+binary there:
 
 ```bash
-mv "$(go env GOPATH)/bin/cli" "$(go env GOPATH)/bin/ondx"
+bin_dir="$(go env GOBIN)"
+[ -z "$bin_dir" ] && bin_dir="$(go env GOPATH)/bin"
+mv "$bin_dir/cli" "$bin_dir/ondx"
 ```
 
-Make sure `$(go env GOPATH)/bin` is on your `PATH` (usually `~/go/bin`), then confirm it's
-picked up:
+Make sure that directory is on your `PATH` (usually `~/go/bin`), then confirm it's picked up:
 
 ```bash
 ondx help
@@ -54,8 +57,11 @@ cd openndx-core
 go build -o ondx ./cmd/cli
 ```
 
+This writes `ondx` to the current directory (not your `PATH`), so invoke it as `./ondx ...` in
+every command below, or move it onto your `PATH` yourself.
+
 Or skip the build step entirely and run it straight from source with `go run ./cmd/cli ...` in
-place of `./ondx ...` in every command below.
+place of `./ondx ...`.
 
 ## 2. Log in
 
@@ -68,16 +74,19 @@ stack (ThunderID as IDP on `https://localhost:8090`, client `NDX_CLI`, callback 
 Portal Backend at `http://localhost:8083`), so a bare `ondx login` works out of the box against
 it once that stack is running.
 
-This opens your browser to the identity provider's login page (Authorization Code + PKCE, the
-same flow `gh auth login` uses), catches the redirect on a local callback server, exchanges the
-code for a token, and caches it at `~/.openndx/credentials.json`. Every other command reuses that
-cached token automatically, refreshing it as needed — you only need to log in again once the
-refresh token itself expires.
+This opens your browser to the identity provider's login page (Authorization Code + PKCE, a
+similar browser-based login to what `gh auth login` uses), catches the redirect on a local
+callback server, exchanges the code for a token, and caches it at `~/.openndx/credentials.json`.
+Every other command reuses that cached token automatically, refreshing it as needed — you only
+need to log in again once the refresh token itself expires.
 
-Against a different environment, either pass flags explicitly:
+Against a different environment, either pass flags explicitly — including `--insecure=false` if
+your current profile is `local` (which defaults it to `true` for ThunderID's self-signed dev
+cert) and you're pointing at a real TLS endpoint:
 
 ```bash
-ondx login --issuer https://idp.example.com --client-id ondx-cli --scopes "openid roles email"
+ondx login --issuer https://idp.example.com --client-id ondx-cli --scopes "openid roles email" \
+  --insecure=false
 ```
 
 or set up a named profile once and reuse it (see [Profiles](#4-profiles-for-multiple-environments)
@@ -99,10 +108,9 @@ ondx members create --name "Department of Registrar of Persons" --email drp@drp.
 
 This prints a `memberId` — keep it, you'll need it as `<drpMemberId>` below.
 
-`--idp-user-id` points at a user already provisioned in the identity provider. Against Asgardeo,
-you can omit it and Portal Backend will provision the IDP user itself; against ThunderID (this
-repo's local-dev IDP), Portal Backend can't provision users yet, so create the user in
-ThunderID's console first and pass its ID here.
+`--idp-user-id` points at a user already provisioned in ThunderID — Portal Backend can't provision
+users in ThunderID itself yet, so create the user in ThunderID's console first and pass its ID
+here.
 
 ### 3.2 Register DRP's schema
 
@@ -192,10 +200,13 @@ against a different identity provider.
 | `ondx applications get --app-id ... [--json]`             | Show an application's details and current policy    |
 | `ondx policy update --app-id ... --field ... [flags]`     | Replace an application's granted fields             |
 
-Every command also accepts `--pb-url`, `--credentials-path`, `--insecure`, and `--profile`. Run
-`ondx <command> -h` for the full flags on any of them, or see the
-[flag tables in `cmd/cli/README.md`](../cmd/cli/README.md#commands) for complete detail
-(including env var equivalents for every flag).
+Every command that calls Portal Backend (`members create`, `schemas create`,
+`applications create`/`list`/`get`, `policy update`) also accepts `--pb-url`, `--credentials-path`,
+`--insecure`, and `--profile`. `ondx login` accepts `--credentials-path`, `--insecure`, and
+`--profile`, but not `--pb-url` (it doesn't talk to Portal Backend). `ondx profile list` and
+`ondx profile use <name>` take no flags at all. Run `ondx <command> -h` for the full flags on any
+of them, or see the [flag tables in `cmd/cli/README.md`](../cmd/cli/README.md#commands) for
+complete detail (including env var equivalents for every flag).
 
 ## 6. Troubleshooting
 
@@ -206,10 +217,9 @@ Every command also accepts `--pb-url`, `--credentials-path`, `--insecure`, and `
 - **`ondx login` rejects your `--callback-port`** — ThunderID's `NDX_CLI` client has a redirect
   URI pinned to `http://127.0.0.1:8765/callback`; `ondx` enforces port `8765` for that client
   instead of attempting a login the IDP would reject anyway.
-- **Member/application creation against ThunderID fails without `--idp-*` flags** — Portal
-  Backend's outbound IDP calls (provisioning a user or OAuth2 client automatically) are only
-  implemented against Asgardeo today. Against ThunderID, provision the user/client manually in
-  its console first, then pass `--idp-user-id` / `--idp-application-id --idp-client-id`.
+- **Member/application creation fails without `--idp-*` flags** — Portal Backend can't provision
+  users or OAuth2 clients in ThunderID automatically yet. Provision the user/client manually in
+  ThunderID's console first, then pass `--idp-user-id` / `--idp-application-id --idp-client-id`.
 
 For anything not covered here — full flag tables, the TLS/callback-port/ThunderID-resource-binding
 notes, and current limitations — see [`cmd/cli/README.md`](../cmd/cli/README.md).
